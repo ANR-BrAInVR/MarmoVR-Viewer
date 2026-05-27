@@ -11,7 +11,7 @@ saveNoShow	True			# bool: skips showing the monitoring when saving and run faste
 sendPos3D	False			# Bool: send 3D positions to Unreal based on detection or DLC (needs triangulate enabled)
 
 # Viewer settings
-viewMode	2				# int: viewer mode 2:'2D videos' or 3:'3D plots'
+viewMode	3				# int: viewer mode 2:'2D videos' or 3:'3D plots'
 showDLC		True			# bool: show DLC
 showTrack	True			# bool: show animal tracking
 trailFrames	20				# int: number of frames shown for trail (from 1 no trail to 60 for a 2s trail)

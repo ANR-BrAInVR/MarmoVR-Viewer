@@ -449,17 +449,14 @@ class Viewer:
 
 
     def Plot3DPlayer(self, plotViews=['+x+y', '-x+y+z']):     # in ['+x+y', '+x+z', '+y+z']
-        """Starts 3D plot player with tracking and DLC results (THREAD)
-        """
-        """  https://matplotlib.org/stable/api/_as_gen/ matplotlib.axes.Axes.quiver.html
-        """
+        """Starts 3D plot player with tracking and DLC results (THREAD)"""
 
         self.log.LogText(1, 'Plot3DPlayer() called')
 
         # Set initial control flags
         self.play.value = False
-        playStarted = False
         self.stopPlayer.value = False
+        playStarted = False
 
         # Full path with filename basis
         fullNameBasis = os.path.join(self.s.resultsDir, self.expID.value, self.subjectID.value, self.file.value)
@@ -467,7 +464,7 @@ class Viewer:
         # Builds matplotlib colors for DLC keypoints
         keyPltColors = {}
         for keyName in keyNames:
-            keyPltColors[keyName] = (keyColors[keyName][2] / 255, keyColors[keyName][1] / 255, keyColors[keyName][0] / 255)
+            keyPltColors[keyName] = (keyColors[keyName][2]/255, keyColors[keyName][1]/255, keyColors[keyName][0]/255)
 
         # Loads 3D results (triangulations)
         filename = fullNameBasis + self.s.ext3D + '.npy'
@@ -520,7 +517,7 @@ class Viewer:
                 has3D = True
                 xs, x, ys, y, zs, z = pv
                 ax3D = ax = fig.add_subplot(spList[pvi], projection='3d')
-                scPlots[pv] = ax.scatter(0, 0, 0, c=0, s=0.2, marker='o', animated=True)
+                scPlots[pv] = ax.scatter(0, 0, 0, c=0, s=0.2, marker='o')
                 if self.showTrack.value:
                     qvPlots[pv] = ax.quiver([0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], color=['k', 'b'])   # To draw vectors
                 # Z axis settings
