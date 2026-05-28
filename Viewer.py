@@ -5,7 +5,9 @@ Created on Wed December 7th 2022, 12:30:45
 @authors: Manuel
 
 TODO:
+- ajouter squelette
 - Ajouter les events
++ faire fonctionner sous windows (process spawned vs forked sous linux)
 + implémenter startFrame et endFrame
 + ajuster taille des marqueurs
 - Plot3D : faire marcher le blitmanager avec projection 3D
@@ -17,6 +19,7 @@ TODO:
 import multiprocessing as mp
 import threading
 import time
+import socket
 import sys
 import os
 import re
@@ -41,29 +44,12 @@ keyRadius = 4       # Maximal radius size of the keypoints for monitoring (when 
 cyclopRadius = 6    # Maximal radius size of cyclop for monitoring (when inference p=1)
 cyclopColor = 0     # Detection or cyclop center color (white)
 
-# Settings (communication between processes)
-viewMode = mp.Value('B', 2)        # Viewer mode 2:'2D videos' or 3:'3D plots'
-showTrack = mp.Value('B', 1)       # Show animal tracking
-showDLC = mp.Value('B', 1)         # Show DLC inferred keypoints
-trailFrames = mp.Value('I', 0)     # Number of frames used to create trail (0 for no trail)
-useCyclop = mp.Value('B', 1)       # Use 2D detection if True, else DLC inferred cyclop
-speed = mp.Value('f', 1)           # Play speed, use values in [0.125, 0.25, 0.5, 1, 2, 4, 8]
+IP = {'Tracking': '192.168.0.2', 'Rendering': '192.168.0.1'}
+UDPserverRendering = (IP['Rendering'], 50771)
 
-# Global control flags (communication between processes)
-startPlayer = mp.Value('B', 0)     # Start player when True
-stopPlayer = mp.Value('B', 0)      # Stop player when True
-quit = mp.Value('B', 0)            # Quits all when True
-play = mp.Value('B', 0)            # Play/Pause when True/False
-imgIndex = mp.Value('L', 0)        # Current image index
-nFrames = mp.Value('L', 0)         # Number of frames in video or results files
-saveVideos = mp.Value('B', 0)      # Save panel videos with overlay or 3D plots when True
-
-# Global strings (communication between processes)
-manager = mp.Manager()
-expID = manager.Value(c_wchar_p, 'MyExp')
-subjectID = manager.Value(c_wchar_p, 'MySubject')
-file = manager.Value(c_wchar_p, 'MyFile')
-
+# Settings place holder
+class Settings:
+    owner = None
 
 # Viewer object
 class Viewer:
@@ -78,18 +64,39 @@ class Viewer:
         self.log.LogText(1, 'Viewer() called')
 
         # Load settings
-        self.LoadSettingsFile('Settings.txt')
+        self.s = Settings()
+        self.LoadSettingsFile('Settings', storeVariable='self.s')
+        self.log.logLevel = self.s.logLevel             # Updates log level
+
+        # Settings (communication between processes)
+        self.viewMode = mp.Value('B', self.s.viewMode)        # Viewer mode 2:'2D videos' or 3:'3D plots'
+        self.showTrack = mp.Value('B', self.s.showTrack)      # Show animal tracking
+        self.showDLC = mp.Value('B', self.s.showDLC)          # Show DLC inferred markers
+        self.trailFrames = mp.Value('I', self.s.trailFrames)  # Number of frames used to create trail (0 for no trail)
+        self.useCyclop = mp.Value('B', self.s.useCyclop)      # Use 2D detection if True, else DLC inferred cyclop
+        self.speed = mp.Value('f', self.s.speed)              # Play speed, use values in [0.125, 0.25, 0.5, 1, 2, 4, 8]
+        self.saveVideos = mp.Value('B', self.s.saveVideos)    # Save 2D videos with overlay or 3D plots when True
+        self.sendPos3D = mp.Value('B', self.s.sendPos3D)      # Stream 3D pos to rendering
+
+        # Global control flags (communication between processes)
+        self.startPlayer = mp.Value('B', 0)     # Start player when True
+        self.stopPlayer = mp.Value('B', 0)      # Stop player when True
+        self.quit = mp.Value('B', 0)            # Quits all when True
+        self.play = mp.Value('B', 0)            # Play/Pause when True/False
+        self.imgIndex = mp.Value('L', 0)        # Current image index
+        self.nFrames = mp.Value('L', 0)         # Number of frames in video or results files
+        self.framerate = mp.Value('I', 0)       # Framerate of videos or results files
+
+        # Global strings (communication between processes)
+        manager = mp.Manager()
+        self.expID = manager.Value(c_wchar_p, '<expID>')
+        self.subjectID = manager.Value(c_wchar_p, '<subjectID>')
+        self.file = manager.Value(c_wchar_p, '<fileID>')
 
         # Initialize process shared variables
-        viewMode.value = self.viewMode
-        showTrack.value = self.showTrack
-        showDLC.value = self.showDLC
-        trailFrames.value = self.trailFrames
-        useCyclop.value = self.useCyclop
-        speed.value = self.speed
-        startPlayer.value = False
-        quit.value = False
-        saveVideos.value = self.saveVideos
+        if self.s.expID != '':
+            self.expID.value = self.s.expID
+            self.resLogFile = os.path.join(self.s.resultsDir, self.s.expID, self.s.expID + '_files.tsv')
 
         # Starts GUI
         self.ViewerUIproc = mp.Process(target=self.StartViewerUI)
@@ -97,31 +104,31 @@ class Viewer:
         self.log.LogText(2, 'Viewer: GUI process started')
 
         # Start viewer listener
-        while not quit.value:
+        while not self.quit.value:
 
             # Waits for player start
-            if startPlayer.value:
-                startPlayer.value = False
+            if self.startPlayer.value:
+                self.startPlayer.value = False
 
-                if not self.showDLC and not self.showTrack:
-                    # if saveVideos.value:
+                if not self.showDLC.value and not self.showTrack.value:
+                    # if self.saveVideos.value:
                     #     self.log.LogText(2, 'Viewer: saveVideos=True but no overlay asked (DLC or Track), ignoring.')
-                    #     saveVideos.value = False
-                    if viewMode.value == 3:
+                    #     self.saveVideos.value = False
+                    if self.viewMode.value == 3:
                         self.log.LogText(2, 'Viewer: viewMode=\'3D plots\' but no overlay asked (DLC or Track), switching to \'2D videos\'.')
-                        viewMode.value = 2
-                if not saveVideos.value:
+                        self.viewMode.value = 2
+                if not self.saveVideos.value:
                     self.saveNoShow = False
 
                 # Start thread corresponding to desired mode
-                if viewMode.value == 2:         # 2D videos
+                if self.viewMode.value == 2:         # 2D videos
                     self.log.LogText(2, 'Viewer: starting VideoPlayer()')
                     self.VideoPlayer()
-                elif viewMode.value == 3:       # 3D plots
+                elif self.viewMode.value == 3:       # 3D plots
                     self.log.LogText(2, 'Viewer: starting Plot3DPlayer()')
                     self.Plot3DPlayer()
                 else:
-                    self.log.LogText(2, 'Viewer: Error, unkown player mode %d, ignoring.' % viewMode.value)
+                    self.log.LogText(2, 'Viewer: Error, unkown player mode %d, ignoring.' % self.viewMode.value)
                     return
 
         self.log.LogText(2, 'Viewer: quit received, quitting')
@@ -132,7 +139,7 @@ class Viewer:
         self.log.LogText(1, 'Viewer destructor called')
 
         # Kill ViewerUI if still there
-        self.ViewerUIproc.kill()
+        # self.ViewerUIproc.kill()
 
         # Close openCV windows and plot if any
         cv2.destroyAllWindows()
@@ -142,34 +149,27 @@ class Viewer:
         time.sleep(0.5)
 
 
-    def StartViewerUI(self):
-
-        myQtApp = QApplication(sys.argv)
-        self.UI = ViewerUI(self.log, self.resultsDir, self.resLogFile, self.framerate)
-        myQtApp.exec_()
-
-
     def VideoPlayer(self):
         """Starts video player with tracking and DLC results"""
 
         self.log.LogText(1, 'VideoPlayer() called')
 
         # Set initial control flags
-        play.value = False
+        self.play.value = False
         playStarted = False
-        stopPlayer.value = False
+        self.stopPlayer.value = False
 
         # Full path with filename basis
-        fullNameBasis = '%s/%s/%s/%s' % (self.resultsDir, expID.value, subjectID.value, file.value)
+        fullNameBasis = os.path.join(self.s.resultsDir, self.expID.value, self.subjectID.value, self.file.value)
 
         # Video variables
-        camCount = len(self.camList)        # Number of cameras
+        camCount = len(self.s.camList)        # Number of cameras
         videos = [None] * camCount          # Video of each camera
         videoNFrames = [0] * camCount       # Number of frames in each video
 
         # Opens videos
         for camInd in range(camCount):
-            camNb = self.camList[camInd]
+            camNb = self.s.camList[camInd]
             videoFilename = fullNameBasis + '_cam%d.mp4' % camNb
             videos[camInd] = cv2.VideoCapture(videoFilename)
             if not videos[camNb].isOpened():
@@ -181,73 +181,86 @@ class Viewer:
         # Prepares target panel
         imgWidth = int(videos[0].get(cv2.CAP_PROP_FRAME_WIDTH))
         imgHeight = int(videos[0].get(cv2.CAP_PROP_FRAME_HEIGHT))
-        resize = self.imgMode == 'full'
+        resize = self.s.imgMode == 'full'
         if resize:
             imgMonitDim = [imgHeight // 2, imgWidth // 2, 3]
         else:
-            imgMonitDim = [self.cropSize[1], self.cropSize[0], 3]
+            imgMonitDim = [self.s.cropSize[1], self.s.cropSize[0], 3]
         panelDim = [imgMonitDim[0] * 2, imgMonitDim[1] * 2, 3]
         imgPanel = np.zeros(panelDim, 'uint8')
 
         # Loads 2D results
-        filename = fullNameBasis + self.ext2D + '.npy'
+        filename = fullNameBasis + self.s.ext2D + '.npy'
         if not os.path.exists(filename):
-            self.log.LogText(1, 'VideoPlayer: Error opening 2D results file \'%s\', quitting' % file.value)
+            self.log.LogText(1, 'VideoPlayer: Error opening 2D results file \'%s\', quitting' % self.file.value)
             # self.log.LogText(1, 'VideoPlayer: Error opening 2D results file \'%s\', quitting' % filename)
             return -1
         else:
             res2D = np.load(filename)
 
-        if self.showTriang:
+        if self.s.showTriang:
             # Loads 3D results (triangulations)
-            filename = fullNameBasis + self.ext3D + '.npy'
+            filename = fullNameBasis + self.s.ext3D + '.npy'
             if not os.path.exists(filename):
-                self.log.LogText(1, 'VideoPlayer: Error opening 3D results file \'%s\', ignoring triangulation data' % file.value)
-                self.showTriang = False
+                self.log.LogText(1, 'VideoPlayer: Error opening 3D results file \'%s\', ignoring triangulation data' % self.file.value)
+                self.s.showTriang = False
             else:
                 res3D = np.load(filename)
                 # dt3D = res3D.dtype
 
         # Get framerate and number of frames
-        self.framerate = int(videos[0].get(cv2.CAP_PROP_FPS))       # Overrides Settings.txt value
-        nFrames.value = min(videoNFrames)
-        nFrames.value = nFrames.value if maxFramesProcessed <= 0 else maxFramesProcessed
-        startFrame = max(0, self.startFrame)
-        endFrame = max(startFrame+1, min(nFrames.value, self.endFrame)) if self.endFrame > 0 else nFrames.value
+        self.framerate.value = int(videos[0].get(cv2.CAP_PROP_FPS))       # Overrides Settings.txt value
+        self.nFrames.value = min(videoNFrames)
+        self.nFrames.value = self.nFrames.value if maxFramesProcessed <= 0 else maxFramesProcessed
+        startFrame = max(0, self.s.startFrame)
+        endFrame = max(startFrame+1, min(self.nFrames.value, self.s.endFrame)) if self.s.endFrame > 0 else self.nFrames.value
 
-        self.log.LogText(2, 'VideoPlayer: nFrames=%d (at %d fps)' % (nFrames.value, self.framerate))
-        imgIndex.value = startFrame
+        self.log.LogText(2, 'VideoPlayer: nFrames=%d (at %d fps)' % (self.nFrames.value, self.framerate.value))
+        self.imgIndex.value = startFrame
         fInd = -1
         t0 = time.time_ns()     # Initial time (for playback speed)
+
+        if self.sendPos3D.value:
+            # Loads 3D results (triangulations)
+            filename = fullNameBasis + self.s.ext3D + '.npy'
+            if not os.path.exists(filename):
+                self.log.LogText(1, 'Plot3DPlayer: Error opening 3D results file \'%s\', quitting' % self.file.value)
+                return -1
+            else:
+                res3D = np.load(filename)
+                # dt3D = res3D.dtype
+
+            # Starts connection with Rendering PC
+            UDPServerSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # Main loop
         while True:
 
             # If not playing yet, waits for play command
             if not playStarted:
-                while not play.value:
+                while not self.play.value:
                     pass
 
                 # Prepare video recording
-                if saveVideos.value:
-                    videoFilename = fullNameBasis + '_panel' + (' (with DLC)' if showDLC.value else '') + '.mp4'
+                if self.saveVideos.value:
+                    videoFilename = fullNameBasis + '_panel' + (' (with DLC)' if self.showDLC.value else '') + '.mp4'
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    videoOut = cv2.VideoWriter(videoFilename, fourcc, self.framerate, (panelDim[1], panelDim[0]), isColor=True)
+                    videoOut = cv2.VideoWriter(videoFilename, fourcc, self.framerate.value, (panelDim[1], panelDim[0]), isColor=True)
                     self.log.LogText(2, ' VideoPlayer: output video writers created')
 
                 if not self.saveNoShow:
                     # Prepare window
-                    windowName = 'Images %s' % ('(with DLC)' if showDLC.value else '')
+                    windowName = 'Images %s' % ('(with DLC)' if self.showDLC.value else '')
                     cv2.namedWindow(windowName, cv2.WINDOW_GUI_NORMAL | cv2.WINDOW_AUTOSIZE)
-                    cv2.moveWindow(windowName, self.xMonitWin, 0)
+                    cv2.moveWindow(windowName, self.s.xMonitWin, 16)
 
                 playStarted = True
                 self.log.LogText(2, 'VideoPlayer: Play received')
 
             # Stop player received
-            if stopPlayer.value:
+            if self.stopPlayer.value:
                 # Close video output recording
-                if saveVideos.value:
+                if self.saveVideos.value:
                     videoOut.release()
                     self.log.LogText(2, 'VideoPlayer: output video writers closed')
 
@@ -255,43 +268,43 @@ class Viewer:
                 break
 
             # Check if paused
-            if not play.value and imgIndex.value == fInd:
+            if not self.play.value and self.imgIndex.value == fInd:
                 continue
 
             # Check end of file
-            if imgIndex.value >= endFrame:
-                if not saveVideos.value:
+            if self.imgIndex.value >= endFrame:
+                if not self.saveVideos.value:
                     self.log.LogText(2, 'VideoPlayer: Reached end of video file, looping')
-                    imgIndex.value = startFrame
+                    self.imgIndex.value = startFrame
                 else:
                     self.log.LogText(2, 'VideoPlayer: Reached end of video file, quitting')
-                    stopPlayer.value = True
+                    self.stopPlayer.value = True
                     continue
 
             # Jump to the desired frame when img index is changed by slider or buttons
-            if imgIndex.value != fInd + 1:
-                fInd = imgIndex.value
+            if self.imgIndex.value != fInd + 1:
+                fInd = self.imgIndex.value
                 for camInd in range(camCount):
                     videos[camInd].set(cv2.CAP_PROP_POS_FRAMES, fInd)
                 self.log.LogText(3, 'VideoPlayer: imgIndex set to %d' % fInd)
             else:
                 # Blocks current frame index
-                fInd = imgIndex.value
+                fInd = self.imgIndex.value
 
             # Displays videos with 2D data overlayer
             for camInd in range(camCount):
-                camNb = self.camList[camInd]
+                camNb = self.s.camList[camInd]
 
                 # Prepare crop ranges
                 posUL = res2D['pos(UL)_cam%d' % camNb][fInd]
                 Xmin = posUL[0]
-                Xmax = posUL[0] + self.cropSize[0]
+                Xmax = posUL[0] + self.s.cropSize[0]
                 Ymin = posUL[1]
-                Ymax = posUL[1] + self.cropSize[1]
+                Ymax = posUL[1] + self.s.cropSize[1]
 
                 # Get next image in the desired format
                 ret, img = videos[camNb].read()
-                self.log.LogText(3, 'VideoPlayer(%d): Next frame loaded (imgIndex=%d)' % (camNb, imgIndex.value))
+                self.log.LogText(3, 'VideoPlayer(%d): Next frame loaded (imgIndex=%d)' % (camNb, self.imgIndex.value))
 
                 if resize:
                     # Get full image and draws crop rectangle
@@ -301,20 +314,20 @@ class Viewer:
                     img = np.copy(img[Ymin:Ymax, Xmin:Xmax, :])
 
                 # Adds detected fish position or DLC inferred cyclop
-                if showTrack.value:
-                    if useCyclop.value:
+                if self.showTrack.value:
+                    if self.useCyclop.value:
                         # Draws trail (if trailFrames.value > 1)
-                        for fIndTrail in range(max(fInd-trailFrames.value+1, 0), fInd):
+                        for fIndTrail in range(max(fInd-self.trailFrames.value+1, 0), fInd):
                             pPos = res2D['proba(Cyclop)_cam%d' % camNb][fIndTrail]
                             if pPos != -1:
                                 if resize:
                                     xPos, yPos = res2D['pos(Cyclop)_cam%d' % camNb][fIndTrail].astype(int)
                                 else:
                                     xPos, yPos = res2D['pos(Cyclop)_cam%d' % camNb][fIndTrail].astype(int) - posUL
-                                cPos = int(255 * (fInd - fIndTrail) / trailFrames.value)
+                                cPos = int(255 * (fInd - fIndTrail) / self.trailFrames.value)
                                 img = cv2.circle(img, (xPos, yPos), int(keyRadius * pPos), [cPos] * 3, thickness=cv2.FILLED)
 
-                        self.log.LogText(3, 'VideoPlayer(%d): Draw DLC inferred cyclop (imgIndex=%d)' % (camNb, imgIndex.value))
+                        self.log.LogText(3, 'VideoPlayer(%d): Draw DLC inferred cyclop (imgIndex=%d)' % (camNb, self.imgIndex.value))
 
                         # Draws circle(s) on inferred cyclop position
                         pPos = res2D['proba(Cyclop)_cam%d' % camNb][fInd]
@@ -327,12 +340,12 @@ class Viewer:
                             img = cv2.circle(img, (xPos, yPos), int(keyRadius * pPos), [cyclopColor] * 3, thickness=cv2.FILLED)
                     else:
                         # Draws trail (if trailFrames.value > 1)
-                        for fIndTrail in range(max(fInd-trailFrames.value+1, 0), fInd):
+                        for fIndTrail in range(max(fInd-self.trailFrames.value+1, 0), fInd):
                             if resize:
                                 xPos, yPos = res2D['pos(0)_cam%d' % camNb][fIndTrail].astype(int)
                             else:
                                 xPos, yPos = res2D['pos(0)_cam%d' % camNb][fIndTrail].astype(int) - posUL
-                            cPos = int(255 * (fInd - fIndTrail) / trailFrames.value)
+                            cPos = int(255 * (fInd - fIndTrail) / self.trailFrames.value)
                             img = cv2.circle(img, (xPos, yPos), int(keyRadius), [cPos] * 3, thickness=cv2.FILLED)
                         self.log.LogText(3, 'VideoPlayer(%d): Draw detected animal position' % camNb)
 
@@ -345,8 +358,8 @@ class Viewer:
                         img = cv2.circle(img, (xPos, yPos), int(keyRadius), [cyclopColor] * 3, thickness=cv2.FILLED)
 
                 # Adds keypoints inferred by DLC
-                if showDLC.value:
-                    self.log.LogText(3, 'VideoPlayer(%d): Draw keypoints inferred by DLC (imgIndex=%d) ' % (camNb, imgIndex.value))
+                if self.showDLC.value:
+                    self.log.LogText(3, 'VideoPlayer(%d): Draw keypoints inferred by DLC (imgIndex=%d) ' % (camNb, self.imgIndex.value))
                     for keyName in keyNames:
                         # Get keypoint position and proba
                         if resize:
@@ -364,15 +377,15 @@ class Viewer:
 
                 # Rotate image to align monitoring with setup
                 if not resize:
-                    if self.rotateCamList[camNb] == 90:
+                    if self.s.rotateCamList[camNb] == 90:
                         img = cv2.rotate(img, cv2.ROTATE_90_CLOCKWISE)
-                    elif self.rotateCamList[camNb] == -90:
+                    elif self.s.rotateCamList[camNb] == -90:
                         img = cv2.rotate(img, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    elif self.rotateCamList[camNb] == 180:
+                    elif self.s.rotateCamList[camNb] == 180:
                         img = cv2.rotate(img, cv2.ROTATE_180)
 
                 # Add infos in camera views
-                if useCyclop.value:
+                if self.useCyclop.value:
                     xText = 10 if camNb == 0 or camNb == 2 else imgMonitDim[1] - 160
                     sText = 'Cam%d ' % camNb + '(DLC cyclop)'
                     img = cv2.putText(img, sText, (xText, imgMonitDim[0]-10), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=[255]*3)
@@ -382,22 +395,28 @@ class Viewer:
                     img = cv2.putText(img, sText, (xText, imgMonitDim[0]-10), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=[255]*3)
 
                 # Places updated image in 2-images upper panel (for monitoring)
-                (i, j) = [(1, 0), (1, 1), (0, 0), (0, 1)][self.camList[camInd]]
+                (i, j) = [(1, 0), (1, 1), (0, 0), (0, 1)][self.s.camList[camInd]]
                 imgPanel[i*imgMonitDim[0]:(i+1)*imgMonitDim[0], j*imgMonitDim[1]:(j+1)*imgMonitDim[1]] = img
-                self.log.LogText(4, 'VideoPlayer: imgPanel created for imgIndex %d' % imgIndex.value)
+                self.log.LogText(4, 'VideoPlayer: imgPanel created for imgIndex %d' % self.imgIndex.value)
+
+            # Send 3D position to rendering via UDP
+            if self.sendPos3D.value:
+                # Send data
+                message = '%.3f,%.3f,%.3f' % tuple(res3D['pos(Cyclop)'][fInd])
+                UDPServerSocket.sendto(message.encode(), UDPserverRendering)
 
             # Add retained triangulation value
-            if self.showTriang:
-                tpos3D = tuple(res3D['pos(Cyclop)'][fInd]) if useCyclop.value else tuple(res3D['pos(0)'][fInd])
+            if self.s.showTriang:
+                tpos3D = tuple(res3D['pos(Cyclop)'][fInd]) if self.useCyclop.value else tuple(res3D['pos(0)'][fInd])
                 imgPanel = cv2.putText(imgPanel, 'Triangulation (%.1f, %.1f, %.1f)' % tpos3D, (imgMonitDim[1]-140, panelDim[0]-10), fontFace=cv2.FONT_HERSHEY_SIMPLEX, fontScale=0.5, color=[255]*3)
 
             if not self.saveNoShow:
                 # Waits necessary time for correct speed playback
                 t1 = time.time_ns()
-                if speed.value >= 1.0:
-                    tPad = 1.0/self.framerate - float(t1-t0)/1E9                # In seconds
+                if self.speed.value >= 1.0:
+                    tPad = 1.0/self.framerate.value - float(t1-t0)/1E9                # In seconds
                 else:
-                    tPad = 1.0/speed.value/self.framerate - float(t1-t0)/1E9    # In seconds
+                    tPad = 1.0/self.speed.value/self.framerate.value - float(t1-t0)/1E9    # In seconds
                 if tPad > 0:
                     time.sleep(tPad)
                     self.log.LogText(3, 'VideoPlayer: (%d) pad=%.1f ms' % (fInd, 1000*tPad))
@@ -410,58 +429,60 @@ class Viewer:
             t0 = time.time_ns()
 
             # Update video output recording
-            if saveVideos.value:
+            if self.saveVideos.value:
                 videoOut.write(imgPanel)
                 self.log.LogText(3, ' VideoPlayer: output video writers updated')
 
             # Increments image index if playing
-            if play.value:
-                if speed.value > 1:
-                    imgIndex.value += int(speed.value)
+            if self.play.value:
+                if self.speed.value > 1:
+                    self.imgIndex.value += int(self.speed.value)
                 else:
-                    imgIndex.value += 1
+                    self.imgIndex.value += 1
+
+        if self.sendPos3D.value:
+            # Closes UDP socket
+            UDPServerSocket.close()
 
         # End nicely
         cv2.destroyAllWindows()
 
 
-    def Plot3DPlayer(self, plotViews=['+x+y']):     # in ['+x+y', '+x+z', '+y+z']
-        """Starts 3D plot player with tracking and DLC results (THREAD)
-        """
-        """  https://matplotlib.org/stable/api/_as_gen/ matplotlib.axes.Axes.quiver.html
-        """
+    def Plot3DPlayer(self, plotViews=['+x+y', '-x+y+z']):     # in ['+x+y', '+x+z', '+y+z']
+        """Starts 3D plot player with tracking and DLC results (THREAD)"""
 
         self.log.LogText(1, 'Plot3DPlayer() called')
 
         # Set initial control flags
-        play.value = False
+        self.play.value = False
+        self.stopPlayer.value = False
         playStarted = False
-        stopPlayer.value = False
 
         # Full path with filename basis
-        fullNameBasis = '%s/%s/%s/%s' % (self.resultsDir, expID.value, subjectID.value, file.value)
+        fullNameBasis = os.path.join(self.s.resultsDir, self.expID.value, self.subjectID.value, self.file.value)
 
         # Builds matplotlib colors for DLC keypoints
         keyPltColors = {}
         for keyName in keyNames:
-            keyPltColors[keyName] = (keyColors[keyName][2] / 255, keyColors[keyName][1] / 255, keyColors[keyName][0] / 255)
+            keyPltColors[keyName] = (keyColors[keyName][2]/255, keyColors[keyName][1]/255, keyColors[keyName][0]/255)
 
         # Loads 3D results (triangulations)
-        filename = fullNameBasis + self.ext3D + '.npy'
+        filename = fullNameBasis + self.s.ext3D + '.npy'
         if not os.path.exists(filename):
-            self.log.LogText(1, 'Plot3DPlayer: Error opening 3D results file \'%s\', quitting' % file.value)
+            self.log.LogText(1, 'Plot3DPlayer: Error opening 3D results file \'%s\', quitting' % self.file.value)
             return -1
         else:
             res3D = np.load(filename)
             # dt3D = res3D.dtype
 
-        # Get number of frames
-        nFrames.value = res3D['imgIndex'][-1]
-        nFrames.value = nFrames.value if maxFramesProcessed <= 0 else maxFramesProcessed
-        startFrame = max(0, self.startFrame)
-        endFrame = max(startFrame+1, min(nFrames.value, self.endFrame)) if self.endFrame > 0 else nFrames.value
+        # Get number of frames and framerate
+        self.nFrames.value = res3D['imgIndex'][-1]
+        self.nFrames.value = self.nFrames.value if maxFramesProcessed <= 0 else maxFramesProcessed
+        self.framerate.value = int(1 / (res3D['time'][1]-res3D['time'][0]))
+        startFrame = max(0, self.s.startFrame)
+        endFrame = max(startFrame+1, min(self.nFrames.value, self.s.endFrame)) if self.s.endFrame > 0 else self.nFrames.value
 
-        self.log.LogText(2, 'Plot3DPlayer: nFrames=%d (at %d fps)' % (nFrames.value, self.framerate))
+        self.log.LogText(2, 'Plot3DPlayer: nFrames=%d (at %d fps)' % (self.nFrames.value, self.framerate.value))
 
         # Prepares animated 3D plot
         nPlots = len(plotViews)
@@ -484,90 +505,106 @@ class Viewer:
         lim = {}
         lim['x'] = lim['y'] = (-55, 55)
         lim['z'] = (-5, 80)
-        plt.subplots_adjust(left=0.075, top=0.97, bottom=0.075, right=0.97)
+        plt.subplots_adjust(left=0.05, top=0.98, bottom=0.1, right=0.96)
         blitList = []
         scPlots = {}        # Scatter plots (positions and trail)
         qvPlots = {}        # Quiver plots (vectors)
+        ax3D = None
+        has3D = False
+        has2D = False
         for pvi, pv in enumerate(plotViews):
             if len(pv) == 6:        # 3D plot
+                has3D = True
                 xs, x, ys, y, zs, z = pv
-                ax = fig.add_subplot(spList[pvi], projection='3d')
-                scPlots[pv] = ax.scatter(0, 0, 0, c=0, s=0.2, marker='o', animated=True)
-                if showTrack.value:
-                    qvPlots[pv] = ax.quiver(0, 0, 0, 0, 0, 0, color=['k', 'b'])       # To draw vectors
+                ax3D = ax = fig.add_subplot(spList[pvi], projection='3d')
+                scPlots[pv] = ax.scatter(0, 0, 0, c=0, s=0.2, marker='o')
+                if self.showTrack.value:
+                    qvPlots[pv] = ax.quiver([0, 0], [0, 0], [0, 0], [0, 0], [0, 0], [0, 0], color=['k', 'b'])   # To draw vectors
+                # Z axis settings
                 ax.set_zlabel(z.upper())
                 ax.set_zlim(lim[z])
                 ax.set_zticks(ticks[z])
                 if zs == '-':
                     ax.invert_zaxis()
             elif len(pv) == 4:      # 2D plot
+                has2D = True
                 xs, x, ys, y = pv
                 ax = fig.add_subplot(spList[pvi])
                 scPlots[pv] = ax.scatter(0, 0, c=0, s=0.2, marker='o', animated=True)
-                if showTrack.value:
+                if self.showTrack.value:
                     qvPlots[pv] = ax.quiver([0, 0], [0, 0], color=['k', 'b'])             # To draw vectors
             else:
                 self.log.LogText(2, 'Plot3DPlayer: could not interpret plot view pv=\'%s\', ignoring' % pv)
                 continue
-            ax.set_xlabel(x.upper(), labelpad=-1)
+            # X axis settings
+            ax.set_xlabel(x.upper())
             ax.set_xlim(lim[x])
             ax.set_xticks(ticks[x])
             if xs == '-':
                 ax.invert_xaxis()
-            ax.set_ylabel(y.upper(), labelpad=(-14 if y in ['y', 'x'] else -4))
+            # Y axis settings
+            ax.set_ylabel(y.upper(), labelpad=(-8 if y in ['y', 'x'] and len(pv) else 0))
             ax.set_ylim(lim[y])
             ax.set_yticks(ticks[y])
             if ys == '-':
                 ax.invert_yaxis()
+            # Grid
             ax.grid(linestyle='--', linewidth=0.75)
-            blitList.append(scPlots[pv])
-            if showTrack.value:
-                qvPlots[pv].angles = 'xy'
-                qvPlots[pv].scale_units = 'xy'
-                qvPlots[pv].scale = 1
-                qvPlots[pv].width = 0.004
-                qvPlots[pv].headlength = 5
-                blitList.append(qvPlots[pv])
+            # Blitting only works for 2D axes
+            if len(pv) == 4:
+                blitList.append(scPlots[pv])
+                if self.showTrack.value:
+                    qvPlots[pv].angles = 'xy'
+                    qvPlots[pv].scale_units = 'xy'
+                    qvPlots[pv].scale = 1
+                    qvPlots[pv].width = 0.004
+                    qvPlots[pv].headlength = 5
+                    blitList.append(qvPlots[pv])
 
         # Set window position
         mngr = plt.get_current_fig_manager()
         _, _, winWidth, winHeight = mngr.window.geometry().getRect()
-        mngr.window.setGeometry(self.xMonitWin, 10, winHeight, winWidth)
+        mngr.window.setGeometry(self.s.xMonitWin, 40, winHeight, winWidth)
 
         t0 = time.time_ns()     # Initial time (for playback speed)
-        imgIndex.value = startFrame
+        self.imgIndex.value = startFrame
         fInd = -1
         pos = {}
         vel = {}
         gazeDir = {}
+
+        if self.sendPos3D.value:
+            # Starts connection with Rendering PC
+            UDPServerSocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
         # Main loop
         while True:
 
             # If not playing yet, waits for play command
             if not playStarted:
-                while not play.value: pass
+                while not self.play.value: pass
 
-                # Blit manager
-                bm = BlitManager(fig.canvas, blitList)
+                # Blit manager (for 2D plots only)
+                if has2D:
+                    bm = BlitManager(fig.canvas, blitList)
                 plt.show(block=False)
                 plt.pause(.1)
 
                 # Prepare video recording
-                if saveVideos.value:
+                if self.saveVideos.value:
                     imgWidth, imgHeight = fig.canvas.get_width_height()
-                    videoFilename = fullNameBasis + '_plot3D' + (' (with DLC)' if showDLC.value else '') + '.mp4'
+                    videoFilename = fullNameBasis + '_plot3D' + (' (with DLC)' if self.showDLC.value else '') + '.mp4'
                     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-                    videoOut = cv2.VideoWriter(videoFilename, fourcc, self.framerate, (imgWidth, imgHeight), isColor=True)
+                    videoOut = cv2.VideoWriter(videoFilename, fourcc, self.framerate.value, (imgWidth, imgHeight), isColor=True)
                     self.log.LogText(2, ' VideoPlayer: output video writers created')
 
                 playStarted = True
                 self.log.LogText(2, 'Plot3DPlayer: Play received')
 
             # Stop player received
-            if stopPlayer.value:
+            if self.stopPlayer.value:
                 # Close video output recording
-                if saveVideos.value:
+                if self.saveVideos.value:
                     videoOut.release()
                     self.log.LogText(2, 'Plot3DPlayer: output video writers closed')
 
@@ -575,36 +612,36 @@ class Viewer:
                 break
 
             # Check if paused
-            if not play.value and imgIndex.value == fInd:
+            if not self.play.value and self.imgIndex.value == fInd:
                 continue
 
             # Check end of file
-            if imgIndex.value >= endFrame:
-                if not saveVideos.value:
+            if self.imgIndex.value >= endFrame:
+                if not self.saveVideos.value:
                     self.log.LogText(2, 'Plot3DPlayer: Reached end of video file, looping')
-                    imgIndex.value = startFrame
+                    self.imgIndex.value = startFrame
                 else:
                     self.log.LogText(2, 'Plot3DPlayer: Reached end of video file, quitting')
-                    stopPlayer.value = True
+                    self.stopPlayer.value = True
                     continue
 
             # Jump to the desired frame when img index is changed by slider
-            # if imgIndex.value != fInd + 1:
-            #     self.log.LogText(2, 'Plot3DPlayer: imgIndex set to %d' % imgIndex.value)
+            # if self.imgIndex.value != fInd + 1:
+            #     self.log.LogText(2, 'Plot3DPlayer: imgIndex set to %d' % self.imgIndex.value)
 
             # Blocks current frame index
-            fInd = imgIndex.value
+            fInd = self.imgIndex.value
 
             # Add performance text to panel
-            # sPerf = 'imgIndex=%d/%d  time=%.2f/%.2f' % (fInd, nFrames.value, fInd/self.framerate, nFrames.value/self.framerate)
+            # sPerf = 'imgIndex=%d/%d  time=%.2f/%.2f' % (fInd, self.nFrames.value, fInd/self.framerate.value, self.nFrames.value/self.framerate.value)
 
             if not self.saveNoShow:
                 # Waits necessary time for correct speed playback
                 t1 = time.time_ns()
-                if speed.value >= 1.0:
-                    tPad = 1.0/self.framerate - float(t1-t0)/1E9                # In seconds
+                if self.speed.value >= 1.0:
+                    tPad = 1.0/self.framerate.value - float(t1-t0)/1E9                # In seconds
                 else:
-                    tPad = 1.0/speed.value/self.framerate - float(t1-t0)/1E9    # In seconds
+                    tPad = 1.0/self.speed.value/self.framerate.value - float(t1-t0)/1E9    # In seconds
                 if tPad > 0:
                     time.sleep(tPad)
                     self.log.LogText(3, 'Plot3DPlayer: (%d) pad=%.1f ms' % (fInd, 1000*tPad))
@@ -619,30 +656,30 @@ class Viewer:
             pos['c'] = []
             pos['r'] = []
 
-            if showTrack.value:
+            if self.showTrack.value:
                 # Plot triangulated detected position
-                posField = 'pos(Cyclop)' if useCyclop.value else 'pos(0)'
+                posField = 'pos(Cyclop)' if self.useCyclop.value else 'pos(0)'
 
                 # Draws trail and current (therefore find+1)
-                for fIndTrail in range(max(fInd-trailFrames.value+1, 0), fInd+1):
+                for fIndTrail in range(max(fInd-self.trailFrames.value+1, 0), fInd+1):
                     xPos, yPos, zPos = res3D[posField][fIndTrail]
                     if xPos == -1 and yPos == -1 and zPos == -1: continue
                     pos['x'].append(xPos)
                     pos['y'].append(yPos)
                     pos['z'].append(zPos)
-                    pos['c'].append([(fInd - fIndTrail) / trailFrames.value] * 3)
-                    pos['r'].append(1.0*res3D['proba(Cyclop)'][fIndTrail] if useCyclop.value else 1.0)
+                    pos['c'].append([(fInd - fIndTrail) / self.trailFrames.value] * 3)
+                    pos['r'].append(1.0*res3D['proba(Cyclop)'][fIndTrail] if self.useCyclop.value else 1.0)
 
                 # Draws heading and gazeDir vectors
                 posInd = len(pos['x']) - 1
                 vel['x'], vel['y'], vel['z'] = 0.1 * res3D['vel(Cyclop)'][fInd]
                 gazeDir['x'], gazeDir['y'], gazeDir['z'] = 10 * res3D['gazeDir'][fInd]
 
-            if showDLC.value:
+            if self.showDLC.value:
                 # Plot triangulated inferred DLC keypoints
                 for keyName in keyNames:
                     xKey, yKey, zKey = res3D['pos(%s)' % keyName][fInd]
-                    if xKey == -1 and yKey == -1 and zKey == -1: continue
+                    if (xKey, yKey, zKey) == (-1, -1, -1): continue
                     rKey = 1.0 * res3D['proba(%s)' % keyName][fInd]
                     pos['x'].append(xKey)
                     pos['y'].append(yKey)
@@ -654,24 +691,37 @@ class Viewer:
             for pv in plotViews:
                 if len(pv) == 6:    # 3D plot
                     _, x, _, y, _, z = pv
-                    scPlots[pv].set_offsets(list(zip(pos[x], pos[y], pos[z])))
-                    scPlots[pv].set_color(pos['c'])
-                    scPlots[pv].set_sizes(pos['r'])
-                    # if showTrack.value:
-                    #     qvPlots[pv].set_offsets([pos[x][posInd], pos[y][posInd], pos[z][posInd]])
-                    #     qvPlots[pv].set_UVC(U=[vel[x], gazeDir[x]], V=[vel[y], gazeDir[y]], W=[vel[z], gazeDir[z]])
+                    scPlots[pv]._offsets3d = (np.array(pos[x]), np.array(pos[y]), np.array(pos[z]))
+                    if len(pos['c']) > 0:
+                        # Must set _facecolors3d/_edgecolors3d: do_3d_projection() reads these, not _facecolors
+                        colors_rgba = np.array([[*c, 1.0] for c in pos['c']], dtype=float)
+                        scPlots[pv]._facecolors3d = colors_rgba
+                        scPlots[pv]._edgecolors3d = colors_rgba
+
+                    # Must set _sizes3d: do_3d_projection() reads this, not _sizes
+                    scPlots[pv]._sizes3d = np.array(pos['r'])
+
+                    if self.showTrack.value and len(pos[x]) > 0:
+                        qvPlots[pv].remove()
+                        qvPlots[pv] = ax3D.quiver([pos[x][posInd], pos[x][posInd]], [pos[y][posInd], pos[y][posInd]],
+                            [pos[z][posInd], pos[z][posInd]], [vel[x], gazeDir[x]], [vel[y], gazeDir[y]], [vel[z], gazeDir[z]],
+                            color=['k', 'b'])
                 else:               # 2D plot
                     _, x, _, y = pv
                     scPlots[pv].set_offsets(list(zip(pos[x], pos[y])))
                     scPlots[pv].set_color(pos['c'])
                     scPlots[pv].set_sizes(pos['r'])
-                    if showTrack.value:
+                    if self.showTrack.value:
                         qvPlots[pv].set_offsets([pos[x][posInd], pos[y][posInd]])
                         qvPlots[pv].set_UVC(U=[vel[x], gazeDir[x]], V=[vel[y], gazeDir[y]])
-            bm.update()
+            if has3D:
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+            else:
+                bm.update()
 
             # Update video output recording
-            if saveVideos.value:
+            if self.saveVideos.value:
                 # Convert canvas to image and to BGR
                 img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
                 img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
@@ -680,12 +730,22 @@ class Viewer:
                 videoOut.write(img)
                 self.log.LogText(3, ' Plot3DPlayer: output video writers updated')
 
+            # Send 3D position to rendering via UDP
+            if self.sendPos3D.value:
+                # Send data
+                message = '%.3f,%.3f,%.3f' % tuple(res3D['pos(Cyclop)'][fInd])
+                UDPServerSocket.sendto(message.encode(), UDPserverRendering)
+
             # Increments image index if playing
-            if play.value:
-                if speed.value > 1:
-                    imgIndex.value += int(speed.value)
+            if self.play.value:
+                if self.speed.value > 1:
+                    self.imgIndex.value += int(self.speed.value)
                 else:
-                    imgIndex.value += 1
+                    self.imgIndex.value += 1
+
+        if self.sendPos3D.value:
+            # Closes UDP socket
+            UDPServerSocket.close()
 
         plt.close()
 
@@ -694,7 +754,8 @@ class Viewer:
     def LoadSettingsFile(self, settingsName, storeVariable='self'):
         """Loads specific settings to self or another object's attributes"""
 
-        fname = 'Settings/' + settingsName
+        # fname = 'Settings/' + settingsName + '.txt'
+        fname = os.path.join('Settings', settingsName + '.txt')
         if not os.path.isfile(fname):
             print('Error: could not find \'%s\' file' % settingsName)
             return
@@ -709,22 +770,50 @@ class Viewer:
 
         self.log.LogText(2, '"%s" loaded' % settingsName)
 
-        # Updates log level
-        self.log.logLevel = self.logLevel
+
+    def StartViewerUI(self):
+
+        log = Log(logLevel=2, showTime=True)
+
+        myQtApp = QApplication(sys.argv)
+
+        # Needs to be stored in variable (iu) so that it is not garbage collected and closed immediately
+        ui = ViewerUI(log, self.s.resultsDir, self.resLogFile, self)
+        myQtApp.exec_()
 
 
 # GUI for tracking
 class ViewerUI(QWidget):
 
-    def __init__(self, log, resultsDir, resLogFile, framerate):
+    def __init__(self, log, resultsDir, resLogFile, self_viewer):
         """Constructor"""
 
         # Log object
         self.log = log
         self.log.LogText(1, 'ViewerUI() called')
+
+        # Get other objects from Viewer object
         self.resLogFile = resLogFile
         self.resultsDir = resultsDir
-        self.framerate = framerate
+
+        self.expID = self_viewer.expID
+        self.subjectID = self_viewer.subjectID
+        self.file = self_viewer.file
+        self.viewMode = self_viewer.viewMode
+        self.showTrack = self_viewer.showTrack
+        self.showDLC = self_viewer.showDLC
+        self.trailFrames = self_viewer.trailFrames
+        self.useCyclop = self_viewer.useCyclop
+        self.speed = self_viewer.speed
+        self.saveVideos = self_viewer.saveVideos
+        self.sendPos3D = self_viewer.sendPos3D
+        self.startPlayer = self_viewer.startPlayer
+        self.stopPlayer = self_viewer.stopPlayer
+        self.quit = self_viewer.quit
+        self.play = self_viewer.play
+        self.imgIndex = self_viewer.imgIndex
+        self.nFrames = self_viewer.nFrames
+        self.framerate = self_viewer.framerate
 
         super().__init__()
 
@@ -765,7 +854,7 @@ class ViewerUI(QWidget):
         self.viewModeCombo.setGeometry(posX + 120, posY, 100, 30)
         self.viewModeCombo.addItems(['2D videos', '3D plots'])
         self.viewModeCombo.setEnabled(True)
-        self.viewModeCombo.setCurrentIndex(viewMode.value - 2)
+        self.viewModeCombo.setCurrentIndex(self.viewMode.value - 2)
         self.viewModeCombo.currentIndexChanged.connect(self.ViewMode)
         posY += 40
 
@@ -773,7 +862,7 @@ class ViewerUI(QWidget):
         self.showDLCBtn = QPushButton('Show DLC', self)
         self.showDLCBtn.setGeometry(posX, posY, 240, 30)
         self.showDLCBtn.setCheckable(True)
-        self.showDLCBtn.setChecked(showDLC.value)
+        self.showDLCBtn.setChecked(self.showDLC.value)
         self.showDLCBtn.clicked.connect(self.ShowDLC)
         posY += 35
 
@@ -781,7 +870,7 @@ class ViewerUI(QWidget):
         self.showTrackBtn = QPushButton('Show Track', self)
         self.showTrackBtn.setGeometry(posX, posY, 240, 30)
         self.showTrackBtn.setCheckable(True)
-        self.showTrackBtn.setChecked(showTrack.value)
+        self.showTrackBtn.setChecked(self.showTrack.value)
         self.showTrackBtn.clicked.connect(self.ShowTrack)
         posY += 35
 
@@ -792,8 +881,8 @@ class ViewerUI(QWidget):
         self.trailSpinbox.setGeometry(posX + 150, posY, 60, 30)
         self.trailSpinbox.setRange(1, 60)
         self.trailSpinbox.setSingleStep(1)
-        self.trailSpinbox.setValue(trailFrames.value)
-        self.trailSpinbox.setEnabled(showTrack.value)
+        self.trailSpinbox.setValue(self.trailFrames.value)
+        self.trailSpinbox.setEnabled(self.showTrack.value)
         self.trailSpinbox.valueChanged.connect(self.TrailSize)
         posY += 35
 
@@ -801,15 +890,15 @@ class ViewerUI(QWidget):
         self.useCyclopChkbox = QCheckBox('Use cyclop', self)
         self.useCyclopChkbox.setGeometry(posX + 10, posY, 110, 30)
         self.useCyclopChkbox.setCheckable(True)
-        self.useCyclopChkbox.setChecked(useCyclop.value)
-        self.useCyclopChkbox.setEnabled(showTrack.value)
+        self.useCyclopChkbox.setChecked(self.useCyclop.value)
+        self.useCyclopChkbox.setEnabled(self.showTrack.value)
         self.useCyclopChkbox.clicked.connect(self.UseCyclop)
 
         # Save output videos with overlay or plots 3D
         self.saveVideosChkbox = QCheckBox('Save video', self)
         self.saveVideosChkbox.setGeometry(posX + 130, posY, 110, 30)
         self.saveVideosChkbox.setCheckable(True)
-        self.saveVideosChkbox.setChecked(saveVideos.value)
+        self.saveVideosChkbox.setChecked(self.saveVideos.value)
         self.saveVideosChkbox.setEnabled(True)
         self.saveVideosChkbox.clicked.connect(self.SaveVideos)
         posY += 35
@@ -819,35 +908,35 @@ class ViewerUI(QWidget):
 
     def ViewMode(self):
 
-        viewMode.value = 2 if self.viewModeCombo.currentText() == '2D videos' else 3
-        self.log.LogText(2, 'ViewerUI: viewMode=%d' % viewMode.value)
+        self.viewMode.value = 2 if self.viewModeCombo.currentText() == '2D videos' else 3
+        self.log.LogText(2, 'ViewerUI: viewMode=%d' % self.viewMode.value)
 
     def TrailSize(self):
 
-        trailFrames.value = self.trailSpinbox.value()
-        self.log.LogText(2, 'ViewerUI: trailFrames is %d frames' % trailFrames.value)
+        self.trailFrames.value = self.trailSpinbox.value()
+        self.log.LogText(2, 'ViewerUI: trailFrames is %d frames' % self.trailFrames.value)
 
     def ShowTrack(self):
 
-        showTrack.value = self.showTrackBtn.isChecked()
-        self.trailSpinbox.setEnabled(showTrack.value)
-        self.useCyclopChkbox.setEnabled(showTrack.value)
-        self.log.LogText(2, 'ViewerUI: showTrack %s' % ('checked' if showTrack.value else 'unchecked'))
+        self.showTrack.value = self.showTrackBtn.isChecked()
+        self.trailSpinbox.setEnabled(self.showTrack.value)
+        self.useCyclopChkbox.setEnabled(self.showTrack.value)
+        self.log.LogText(2, 'ViewerUI: showTrack %s' % ('checked' if self.showTrack.value else 'unchecked'))
 
     def ShowDLC(self):
 
-        showDLC.value = self.showDLCBtn.isChecked()
-        self.log.LogText(2, 'ViewerUI: showDLC %s' % ('checked' if showDLC.value else 'unchecked'))
+        self.showDLC.value = self.showDLCBtn.isChecked()
+        self.log.LogText(2, 'ViewerUI: self.showDLC %s' % ('checked' if showDLC.value else 'unchecked'))
 
     def UseCyclop(self):
 
-        useCyclop.value = self.useCyclopChkbox.isChecked()
-        self.log.LogText(2, 'ViewerUI: useCyclop %s' % ('checked' if useCyclop.value else 'unchecked'))
+        self.useCyclop.value = self.useCyclopChkbox.isChecked()
+        self.log.LogText(2, 'ViewerUI: useCyclop %s' % ('checked' if self.useCyclop.value else 'unchecked'))
 
     def SaveVideos(self):
 
-        saveVideos.value = self.saveVideosChkbox.isChecked()
-        self.log.LogText(2, 'ViewerUI: saveVideos %s' % ('checked' if saveVideos.value else 'unchecked'))
+        self.saveVideos.value = self.saveVideosChkbox.isChecked()
+        self.log.LogText(2, 'ViewerUI: saveVideos %s' % ('checked' if self.saveVideos.value else 'unchecked'))
 
     def SelectExperimentFileUI(self, posX, posY):
 
@@ -962,15 +1051,15 @@ class ViewerUI(QWidget):
             return
 
         # And store expID, subjectID and file in the viewer properties
-        expID.value = self.resLogSubj[ind][0]
-        subjectID.value = self.resLogSubj[ind][1]
-        file.value = self.resLogSubj[ind][4]
+        self.expID.value = self.resLogSubj[ind][0]
+        self.subjectID.value = self.resLogSubj[ind][1]
+        self.file.value = self.resLogSubj[ind][4]
 
         # Updates widgets status
         self.startBtn.setEnabled(True)
         self.speedCombo.setEnabled(True)
 
-        self.log.LogText(2, 'ViewerUI: Trial file selected \'%s\'' % file.value)
+        self.log.LogText(2, 'ViewerUI: Trial file selected \'%s\'' % self.file.value)
 
     def ControllerUI(self, posX, posY):
 
@@ -1059,7 +1148,7 @@ class ViewerUI(QWidget):
     def StartPlayer(self):
 
         # Sends the startPlayer command to the viewer
-        startPlayer.value = True
+        self.startPlayer.value = True
 
         # Updates widgets status
         self.saveVideosChkbox.setEnabled(False)
@@ -1072,7 +1161,7 @@ class ViewerUI(QWidget):
         self.playPauseBtn.setEnabled(True)
 
         # Slider
-        time.sleep(0.05)        # Give time to player to feed nFrames.value
+        time.sleep(0.05)        # Give time to player to feed self.nFrames.value
         self.SliderThread = threading.Thread(target=self.SliderUpdateCursor, args=())
         self.sliderLblL.setEnabled(True)
         self.sliderLblR.setEnabled(True)
@@ -1086,8 +1175,8 @@ class ViewerUI(QWidget):
     def StopPlayer(self):
 
         # Sends the stop player command to the viewer
-        stopPlayer.value = True
-        play.value = False
+        self.stopPlayer.value = True
+        self.play.value = False
         self.log.LogText(2, 'ViewerUI: Stop button pressed')
 
         # Updates widgets status
@@ -1115,75 +1204,75 @@ class ViewerUI(QWidget):
 
     def PlayPause(self):
 
-        self.log.LogText(2, 'ViewerUI: [%s] button pressed' % ('Pause' if play.value else 'Play'))
+        self.log.LogText(2, 'ViewerUI: [%s] button pressed' % ('Pause' if self.play.value else 'Play'))
 
         # Sends the play command to the viewer
-        play.value = not play.value
+        self.play.value = not self.play.value
 
         # Updates widgets status
         self.playPauseBtn.clicked.disconnect()
-        self.playPauseBtn.setText('Pause' if play.value else 'Play')
-        self.playPauseBtn.setChecked(play.value)
+        self.playPauseBtn.setText('Pause' if self.play.value else 'Play')
+        self.playPauseBtn.setChecked(self.play.value)
         self.playPauseBtn.clicked.connect(self.PlayPause)
-        self.b10Btn.setEnabled(not play.value)
-        self.b1Btn.setEnabled(not play.value)
-        self.f1Btn.setEnabled(not play.value)
-        self.f10Btn.setEnabled(not play.value)
+        self.b10Btn.setEnabled(not self.play.value)
+        self.b1Btn.setEnabled(not self.play.value)
+        self.f1Btn.setEnabled(not self.play.value)
+        self.f10Btn.setEnabled(not self.play.value)
 
     def B10(self):
         self.log.LogText(2, 'ViewerUI: [-10] button pressed')
-        imgIndex.value = max(0, imgIndex.value - 10)
+        self.imgIndex.value = max(0, self.imgIndex.value - 10)
 
     def B1(self):
         self.log.LogText(2, 'ViewerUI: [-1] button pressed')
-        imgIndex.value = max(0, imgIndex.value - 1)
+        self.imgIndex.value = max(0, self.imgIndex.value - 1)
 
     def F1(self):
         self.log.LogText(2, 'ViewerUI: [+1] button pressed')
-        imgIndex.value = min(nFrames.value-1, imgIndex.value + 1)
+        self.imgIndex.value = min(self.nFrames.value-1, self.imgIndex.value + 1)
 
     def F10(self):
         self.log.LogText(2, 'ViewerUI: [+10] button pressed')
-        imgIndex.value = min(nFrames.value-1, imgIndex.value + 10)
+        self.imgIndex.value = min(self.nFrames.value-1, self.imgIndex.value + 10)
 
     def SelectSpeed(self):
 
         # Get selected speed and stores it in viewer property
         speedStr = self.speedCombo.currentText()
-        speed.value = self.speedDict[speedStr]
+        self.speed.value = self.speedDict[speedStr]
 
         self.log.LogText(2, 'ViewerUI: Speed set to %s' % speedStr)
 
     def SliderSetImgIndex(self, position):
-        imgIndex.value = position
+        self.imgIndex.value = position
         self.log.LogText(2, 'ViewerUI: Slider set imgIndex to %d' % position)
 
     def SliderUpdateCursor(self):
 
-        while nFrames.value == 0:   # While player not ready (ie video or results data not loaded)
+        while self.nFrames.value == 0:   # While player not ready (ie video or results data not loaded)
             continue
 
-        self.log.LogText(1, 'ViewerUI: Slider length is %d' % nFrames.value)
-        self.slider.setRange(0, nFrames.value)
+        self.log.LogText(1, 'ViewerUI: Slider length is %d' % self.nFrames.value)
+        self.slider.setRange(0, self.nFrames.value)
         self.slider.setEnabled(True)
         self.slider.setVisible(True)
         self.sliderLblL.setVisible(True)
         self.sliderLblR.setVisible(True)
         imgIndexPrev = -1
-        while not stopPlayer.value:
-            if nFrames.value != 0 and imgIndexPrev != imgIndex.value:
+        while not self.stopPlayer.value:
+            if self.nFrames.value != 0 and imgIndexPrev != self.imgIndex.value:
                 self.slider.disconnect()
-                self.slider.setValue(imgIndex.value)
+                self.slider.setValue(self.imgIndex.value)
                 self.slider.sliderMoved.connect(self.SliderSetImgIndex)
-                mm, ss = divmod(imgIndex.value/self.framerate, 60)
-                labelL = '%02.0f:%05.2f\n(%d)' % (mm, ss, imgIndex.value)
-                mm, ss = divmod(nFrames.value/self.framerate, 60)
-                labelR = '%02.0f:%05.2f\n(%d)' % (mm, ss, nFrames.value)
+                mm, ss = divmod(self.imgIndex.value/self.framerate.value, 60)
+                labelL = '%02.0f:%05.2f\n(%d)' % (mm, ss, self.imgIndex.value)
+                mm, ss = divmod(self.nFrames.value/self.framerate.value, 60)
+                labelR = '%02.0f:%05.2f\n(%d)' % (mm, ss, self.nFrames.value)
                 self.sliderLblL.setText(labelL)
                 self.sliderLblR.setText(labelR)
-                imgIndexPrev = imgIndex.value
-                if stopPlayer.value:
-                    imgIndex.value = 0
+                imgIndexPrev = self.imgIndex.value
+                if self.stopPlayer.value:
+                    self.imgIndex.value = 0
                     self.slider.setValue(0)
                     break
 
@@ -1197,9 +1286,9 @@ class ViewerUI(QWidget):
         self.log.LogText(2, 'ViewerUI: Sending stop and quit commands to Viewer')
 
         # Soft quit
-        stopPlayer.value = True
+        self.stopPlayer.value = True
         time.sleep(0.05)
-        quit.value = True
+        self.quit.value = True
         time.sleep(0.05)
 
         # Quitting Qt application
@@ -1212,7 +1301,6 @@ class Log:
     def __init__(self, logLevel=int, showTime=True, __output=''):
         """Use output='' for console writing"""
 
-        self.__lock = threading.Lock()
         self.logLevel = logLevel
         self.showTime = showTime
         if showTime:
@@ -1226,7 +1314,6 @@ class Log:
 
     def __del__(self):  # Called when destroying object
 
-        del self.__lock
         if self.__outToFile:
             sys.stdout.flush()
             sys.stdout = self.__stdoutCopy
@@ -1234,13 +1321,11 @@ class Log:
     def LogText(self, level, text):
 
         if self.logLevel >= level:
-            self.__lock.acquire()
             if self.showTime:
                 t = float(time.time_ns() - self.startTime) / 1E9
                 print('%10.6f\t' % t + '  ' * (level - 1) + text)
             else:
                 print('  ' * (level - 1) + text)
-            self.__lock.release()
 
 
 class BlitManager:
@@ -1324,6 +1409,10 @@ if __name__ == '__main__':
 
     # Move to Viewer.py directory (if not already)
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
+
+    # Multi-processing settings
+    mp.set_start_method('spawn')
+    mp.freeze_support()
 
     # Start Viewer
     myViewer = Viewer()

@@ -1,16 +1,17 @@
 # System settings
 logLevel	2				# int: log verbose level of Tracking (0-4)
 imgMode		'crop'			# string: image monitoring mode: 'full' or 'crop'
-xMonitWin	340				# int: x coordinate of left edge of monitoring window (on linux: 340, on windows: 320)
-resultsDir	'/disks/ssd/Results'        # '/disks/ssd/Results' on linux
-resLogFile	'/disks/ssd/Results/Intruder_Task/Intruder_Task_files.tsv'
+xMonitWin	322				# int: x coordinate of left edge of monitoring window (on linux: 340, on windows: 320)
+resultsDir	'E:\Results'	# '/disks/ssd/Results' on linux or 'E:\Results' on windows
+expID		'Intruder_Task'	# string: expID, use '' if you want to use menu input
 ext2D		'_pos2D+DLC (new)'		# string: file extension for 2D results (ex. '_pos2D+DLC' or '_pos2D+DLC (new)')
 ext3D		'_pos3D+DLC (new)'		# string: file extension for 3D results (ex. '_pos3D+DLC' or '_pos3D+DLC (new)')
 saveVideos	False			# bool: save video with the output panel and selected results overlay
 saveNoShow	True			# bool: skips showing the monitoring when saving and run faster (not realtime)
+sendPos3D	False			# Bool: send 3D positions to Unreal based on detection or DLC (needs triangulate enabled)
 
 # Viewer settings
-viewMode	2				# int: viewer mode 2:'2D videos' or 3:'3D plots'
+viewMode	3				# int: viewer mode 2:'2D videos' or 3:'3D plots'
 showDLC		True			# bool: show DLC
 showTrack	True			# bool: show animal tracking
 trailFrames	20				# int: number of frames shown for trail (from 1 no trail to 60 for a 2s trail)
@@ -22,7 +23,6 @@ endFrame	0   			# Int: player ending frame (0 means end of file) (13500)
 
 # Camera settings
 camList		[0, 1, 2, 3]	# list of int: cameras to use (among 0, 1, 2, 3)
-framerate	20				# int: video framerate
 cropSize	(450, 450)		# tuple: size of the ROI for the crop
 rotateCamList	[0, 0, 90, -90]		# list of floats: camera rotations to align monitoring with setup
 
