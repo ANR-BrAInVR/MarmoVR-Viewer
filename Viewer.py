@@ -26,6 +26,8 @@ import re
 import csv
 import numpy as np
 import cv2
+import matplotlib
+matplotlib.use('Qt5Agg')
 import matplotlib.pyplot as plt
 from PyQt5.QtWidgets import *
 from PyQt5.QtCore import Qt
@@ -94,6 +96,7 @@ class Viewer:
         self.file = manager.Value(c_wchar_p, '<fileID>')
 
         # Initialize process shared variables
+        self.saveNoShow = False     # Bug #3 fix: initialise unconditionally so both VideoPlayer and Plot3DPlayer can access it
         if self.s.expID != '':
             self.expID.value = self.s.expID
             self.resLogFile = os.path.join(self.s.resultsDir, self.s.expID, self.s.expID + '_files.tsv')
@@ -303,7 +306,7 @@ class Viewer:
                 Ymax = posUL[1] + self.s.cropSize[1]
 
                 # Get next image in the desired format
-                ret, img = videos[camNb].read()
+                ret, img = videos[camInd].read()
                 self.log.LogText(3, 'VideoPlayer(%d): Next frame loaded (imgIndex=%d)' % (camNb, self.imgIndex.value))
 
                 if resize:
@@ -723,8 +726,9 @@ class Viewer:
             # Update video output recording
             if self.saveVideos.value:
                 # Convert canvas to image and to BGR
-                img = np.frombuffer(fig.canvas.tostring_rgb(), dtype=np.uint8)
-                img = img.reshape(fig.canvas.get_width_height()[::-1] + (3,))
+                # buffer_rgba() replaces tostring_rgb() removed in matplotlib >= 3.8
+                img = np.asarray(fig.canvas.buffer_rgba(), dtype=np.uint8)
+                img = img.reshape(fig.canvas.get_width_height()[::-1] + (4,))[:, :, :3]
                 img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)      # RGB to BGR
 
                 videoOut.write(img)
@@ -926,7 +930,7 @@ class ViewerUI(QWidget):
     def ShowDLC(self):
 
         self.showDLC.value = self.showDLCBtn.isChecked()
-        self.log.LogText(2, 'ViewerUI: self.showDLC %s' % ('checked' if showDLC.value else 'unchecked'))
+        self.log.LogText(2, 'ViewerUI: self.showDLC %s' % ('checked' if self.showDLC.value else 'unchecked'))
 
     def UseCyclop(self):
 
